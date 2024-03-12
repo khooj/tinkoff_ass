@@ -1,0 +1,3 @@
+[submodule "tinkoff_api"]
+	path = tinkoff_api
+	url = https://github.com/RussianInvestments/investAPI
