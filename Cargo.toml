@@ -6,16 +6,14 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+api = { path = "crates/api" }
 anyhow = "1.0.81"
 dotenv = "0.15.0"
 env_logger = "0.11.3"
 log = "0.4.21"
-prost = "0.12.3"
-prost-types = "0.12.3"
+#prost = "0.12.3"
+#prost-types = "0.12.3"
 secrets = "1.2.0"
 tokio = { version = "1.36.0", features = ["full"] }
 tonic = { version = "0.11.0", features = ["tls", "tls-roots"] }
 tracing = "0.1.40"
-
-[build-dependencies]
-tonic-build = "0.11.0"

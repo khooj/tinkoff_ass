@@ -1,10 +1,5 @@
-pub mod tinkoff_api {
-    tonic::include_proto!("tinkoff.public.invest.api.contract.v1");
-}
-
-use tinkoff_api::{users_service_client::UsersServiceClient, GetAccountsRequest};
-
 use anyhow::Result;
+use api::{users_service_client::UsersServiceClient, GetAccountsRequest};
 use secrets::{Secret, SecretBox, SecretVec};
 use std::io::Read;
 use tonic::{
@@ -14,16 +9,17 @@ use tonic::{
 };
 use tracing::instrument;
 
-async fn get_user_accounts(
-    mut client: &mut UsersServiceClient<impl tonic::service::Interceptor>,
-) -> Result<()> {
-    // let request = Request::new(GetAccountsRequest {});
+// async fn get_user_accounts<F>(mut client: &mut UsersServiceClient<F>) -> Result<()>
+// where
+//     F: tonic::client::GrpcService<tonic::body::BoxBody>,
+// {
+//     let request = Request::new(GetAccountsRequest {});
 
-    // let resp = client.get_accounts(request).await?;
-    // let resp = resp.into_inner();
-    // println!("accounts: {:?}", resp.accounts);
-    Ok(())
-}
+//     let resp = client.get_accounts(request).await?;
+//     let resp = resp.into_inner();
+//     println!("accounts: {:?}", resp.accounts);
+//     Ok(())
+// }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
