@@ -27,6 +27,7 @@
           wget
           mold-wrapped
           protobuf
+          libsodium
         ];
         nativeBuildInputs = with pkgs; [ pkg-config nixpkgs-fmt ];
         libs = with pkgs; [];
