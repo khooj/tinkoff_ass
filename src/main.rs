@@ -23,9 +23,9 @@ struct Asset {
     ticker: String,
 }
 
-fn interceptor_fn<'a>(
-    token: &'a MetadataValue<Ascii>,
-) -> impl FnMut(Request<()>) -> tonic::Result<Request<()>, tonic::Status> + 'a {
+fn interceptor_fn(
+    token: &MetadataValue<Ascii>,
+) -> impl FnMut(Request<()>) -> tonic::Result<Request<()>, tonic::Status> + '_ {
     move |mut req: Request<()>| {
         req.metadata_mut().insert("authorization", token.clone());
         Ok(req)
