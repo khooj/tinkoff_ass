@@ -1120,6 +1120,7 @@ dependencies = [
  "log",
  "secrets",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tracing",
 ]
@@ -1184,6 +1185,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

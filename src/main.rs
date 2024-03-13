@@ -1,17 +1,24 @@
 use anyhow::Result;
-use api::{users_service_client::UsersServiceClient, GetAccountsRequest};
+use api::{
+    operations_service_client::OperationsServiceClient,
+    operations_stream_service_client::OperationsStreamServiceClient,
+    portfolio_request::CurrencyRequest, users_service_client::UsersServiceClient, Currency,
+    GetAccountsRequest, GetAccountsResponse, PortfolioRequest, PortfolioStreamRequest,
+};
 use secrets::{Secret, SecretBox, SecretVec};
-use std::io::Read;
+use tokio_stream::{Stream, StreamExt};
 use tonic::{
-    metadata::MetadataValue,
+    metadata::{Ascii, MetadataValue},
     transport::{Certificate, Channel, ClientTlsConfig},
     Request,
 };
 use tracing::instrument;
 
-// async fn get_user_accounts<F>(mut client: &mut UsersServiceClient<F>) -> Result<()>
+// async fn _get_user_accounts<F>(mut client: UsersServiceClient<F>) -> Result<()>
 // where
 //     F: tonic::client::GrpcService<tonic::body::BoxBody>,
+//     F::ResponseBody: tonic::codegen::Body<Data = bytes::Bytes> + Send + 'static,
+//     <F::ResponseBody as tonic::codegen::Body>::Error: Into<tonic::codegen::StdError> + Send,
 // {
 //     let request = Request::new(GetAccountsRequest {});
 
@@ -20,6 +27,15 @@ use tracing::instrument;
 //     println!("accounts: {:?}", resp.accounts);
 //     Ok(())
 // }
+
+fn interceptor_fn<'a>(
+    token: &'a MetadataValue<Ascii>,
+) -> impl FnMut(Request<()>) -> tonic::Result<Request<()>, tonic::Status> + 'a {
+    move |mut req: Request<()>| {
+        req.metadata_mut().insert("authorization", token.clone());
+        Ok(req)
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -32,26 +48,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // });
 
     let token: MetadataValue<_> =
-        format!("Bearer {}", std::env::var("TINKOFF_TOKEN").unwrap()).parse()?;
+        format!("Bearer {}", std::env::var("MAIN_TINKOFF_TOKEN").unwrap()).parse()?;
 
     let tls_config = ClientTlsConfig::new();
 
-    let channel = Channel::from_static("https://sandbox-invest-public-api.tinkoff.ru:443")
+    let channel = Channel::from_static("https://invest-public-api.tinkoff.ru:443")
         .tls_config(tls_config)?
         .connect()
         .await?;
-    println!("connected");
-    // let mut client = UsersServiceClient::new(channel);
-    let mut client = UsersServiceClient::with_interceptor(channel, move |mut req: Request<()>| {
-        req.metadata_mut().insert("authorization", token.clone());
-        Ok(req)
-    });
-    println!("connected");
+
+    let mut user_client =
+        UsersServiceClient::with_interceptor(channel.clone(), interceptor_fn(&token));
+    let mut operations_client =
+        OperationsServiceClient::with_interceptor(channel.clone(), interceptor_fn(&token));
+    let mut operations_stream_client =
+        OperationsStreamServiceClient::with_interceptor(channel.clone(), interceptor_fn(&token));
+
     let request = Request::new(GetAccountsRequest {});
 
-    let resp = client.get_accounts(request).await?;
+    let resp = user_client.get_accounts(request).await?;
     let resp = resp.into_inner();
     println!("accounts: {:?}", resp.accounts);
+
+    let account_id = resp.accounts[0].id.clone();
+
+    let port_stream = operations_stream_client
+        .portfolio_stream(PortfolioStreamRequest {
+            accounts: vec![account_id.clone()],
+        })
+        .await?;
+
+    let mut port_stream = port_stream.into_inner();
+
+    let portfolio_resp = operations_client
+        .get_portfolio(PortfolioRequest {
+            account_id: account_id.clone(),
+            currency: Some(CurrencyRequest::Rub.into()),
+        })
+        .await?;
+    println!("portfolio resp: {:?}", portfolio_resp);
+
+    while let Some(r) = port_stream.next().await {
+        println!("port stream elem: {:?}", r.unwrap().payload);
+    }
 
     Ok(())
 }
