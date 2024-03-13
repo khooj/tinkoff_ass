@@ -135,6 +135,17 @@ impl MoneyValueOps {
     }
 }
 
+fn to_float(x: &MoneyValue) -> f64 {
+    assert_eq!(x.currency, "rub");
+    let nano = x.nano as f64;
+    let units = x.units as f64;
+    units + nano / 10.0_f64.powi(9)
+}
+
+fn to_float_quant(x: &Quotation) -> f64 {
+    x.units as f64
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenv::dotenv().unwrap();
@@ -174,7 +185,7 @@ async fn main() -> anyhow::Result<()> {
     let request = Request::new(GetAccountsRequest {});
 
     let resp = user_client.get_accounts(request).await?.into_inner();
-    println!("accounts: {:?}", resp.accounts);
+    // println!("accounts: {:?}", resp.accounts);
 
     let account_id = resp.accounts[0].id.clone();
 
@@ -237,9 +248,9 @@ async fn main() -> anyhow::Result<()> {
         })
         .collect::<HashMap<_, _>>();
 
-    println!("etfs {:?}", etfs);
+    // println!("etfs {:?}", etfs);
 
-    let total_etf_value: MoneyValue = etfs
+    let total_etf_value = etfs
         .values()
         .map(|e| {
             (
@@ -248,27 +259,59 @@ async fn main() -> anyhow::Result<()> {
                 e.0.lot,
             )
         })
-        .fold(
-            MoneyValue {
-                currency: "rub".into(),
-                units: 0,
-                nano: 0,
-            },
-            |acc, (x, q, lot)| {
-                let acc = MoneyValueOps(acc);
-                let x = MoneyValueOps(x.clone());
-                let x = x.multiply(lot).unwrap();
-                let x = x.try_multiply(q.clone()).unwrap();
-                let acc = acc.try_overflowing_add(x.0).unwrap();
-                acc.0
-            },
-        );
+        .fold(0_f64, |acc, (x, q, lot)| {
+            acc + to_float(x) * to_float_quant(q) * (lot as f64)
+        });
 
     println!("total etf value {:?}", total_etf_value);
 
-    // while let Some(r) = port_stream.next().await {
-    //     println!("port stream elem: {:?}", r.unwrap().payload);
-    // }
+    let etfs = etfs
+        .into_iter()
+        .map(|(k, (etf, pos, alloc))| {
+            let current_alloc = to_float(pos.current_price.as_ref().unwrap())
+                * to_float_quant(pos.quantity.as_ref().unwrap())
+                * (etf.lot as f64)
+                / total_etf_value
+                * 100.0;
+            // let current_alloc = current_alloc.round() as u8;
+            let shifted = if current_alloc < 20.0 {
+                let shift_val = current_alloc * 0.05;
+                (current_alloc - alloc as f64).abs() > shift_val
+            } else {
+                alloc.abs_diff(current_alloc as u8) >= 5
+            };
+
+            let vol = current_alloc * total_etf_value / 100.0;
+
+            (k, (etf, pos, alloc, current_alloc, shifted, vol))
+        })
+        .collect::<HashMap<_, _>>();
+
+    for v in etfs.values() {
+        println!(
+            "ticker {} alloc {} current {} shifted {} vol {}",
+            v.0.ticker, v.2, v.3, v.4, v.5
+        );
+    }
+
+    let realloc = etfs.values().any(|e| e.4);
+    if realloc {
+        println!("required changes:");
+
+        for v in etfs.values() {
+            let target_vol = (v.2 as f64) * total_etf_value / 100.0;
+            let diff = target_vol - v.5;
+            let diff_lot = diff / to_float(v.1.current_price.as_ref().unwrap());
+            let diff_lot = diff_lot.round() as i32;
+            println!(
+                "ticker {} target_vol {} lot_change {} current_price {}",
+                v.0.ticker,
+                target_vol,
+                diff_lot,
+                to_float(v.1.current_price.as_ref().unwrap()),
+            );
+        }
+    }
 
     Ok(())
 }
