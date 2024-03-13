@@ -1,50 +1,16 @@
-use std::{collections::HashMap, panic};
-
-use anyhow::Result;
+use std::collections::HashMap;
 use api::{
     instruments_service_client::InstrumentsServiceClient,
-    operations_service_client::OperationsServiceClient,
-    operations_stream_service_client::OperationsStreamServiceClient,
-    portfolio_request::CurrencyRequest, users_service_client::UsersServiceClient, Currency,
-    FindInstrumentRequest, GetAccountsRequest, GetAccountsResponse, InstrumentIdType,
-    InstrumentRequest, InstrumentStatus, InstrumentType, InstrumentsRequest, MoneyValue,
-    PortfolioRequest, PortfolioStreamRequest, Quotation,
+    operations_service_client::OperationsServiceClient, portfolio_request::CurrencyRequest,
+    users_service_client::UsersServiceClient, GetAccountsRequest, InstrumentStatus,
+    InstrumentsRequest, MoneyValue, PortfolioRequest, Quotation,
 };
-use refinement::{Predicate, Refinement};
-use secrets::{Secret, SecretBox, SecretVec};
-use serde::{Deserialize, Deserializer};
-use tokio_stream::{Stream, StreamExt};
+use serde::Deserialize;
 use tonic::{
     metadata::{Ascii, MetadataValue},
-    transport::{Certificate, Channel, ClientTlsConfig},
+    transport::{Channel, ClientTlsConfig},
     Request,
 };
-use tracing::instrument;
-
-// async fn _get_user_accounts<F>(mut client: UsersServiceClient<F>) -> Result<()>
-// where
-//     F: tonic::client::GrpcService<tonic::body::BoxBody>,
-//     F::ResponseBody: tonic::codegen::Body<Data = bytes::Bytes> + Send + 'static,
-//     <F::ResponseBody as tonic::codegen::Body>::Error: Into<tonic::codegen::StdError> + Send,
-// {
-//     let request = Request::new(GetAccountsRequest {});
-
-//     let resp = client.get_accounts(request).await?;
-//     let resp = resp.into_inner();
-//     println!("accounts: {:?}", resp.accounts);
-//     Ok(())
-// }
-
-// wont use because of deserialization
-struct Percent;
-
-impl Predicate<u8> for Percent {
-    fn test(x: &u8) -> bool {
-        *x <= 100
-    }
-}
-
-type PercentU8 = Refinement<u8, Percent>;
 
 #[derive(Deserialize, Debug)]
 struct Config {
@@ -66,75 +32,6 @@ fn interceptor_fn<'a>(
     }
 }
 
-struct MoneyValueOps(MoneyValue);
-
-impl MoneyValueOps {
-    fn try_overflowing_add(mut self, rhs: MoneyValue) -> anyhow::Result<MoneyValueOps> {
-        if self.0.currency != rhs.currency {
-            return Err(anyhow::anyhow!(
-                "currency not the same: {} {}",
-                self.0.currency,
-                rhs.currency
-            ));
-        }
-
-        let (v, overflowed) = self.0.nano.overflowing_add(rhs.nano);
-        self.0.nano = v;
-
-        let sh = if overflowed { 1 } else { 0 };
-
-        let (v, overflowed) = self.0.units.overflowing_add(rhs.units);
-        if overflowed {
-            return Err(anyhow::anyhow!("overflowed units"));
-        }
-        self.0.units = v;
-        let (v, overflowed) = self.0.units.overflowing_add(sh as i64);
-        if overflowed {
-            return Err(anyhow::anyhow!("overflowed units"));
-        }
-        self.0.units = v;
-        Ok(self)
-    }
-
-    fn try_multiply(mut self, rhs: Quotation) -> anyhow::Result<MoneyValueOps> {
-        panic!("fix multiplication");
-        let MoneyValue {
-            currency,
-            units,
-            nano,
-        } = self.0;
-
-        let Quotation {
-            units: units_q,
-            nano: nano_q,
-        } = rhs;
-
-        let (nano, of) = nano.overflowing_mul(nano_q);
-        let sh = if of { 1 } else { 0 };
-        let (units, of) = units.overflowing_mul(units_q);
-        if of {
-            return Err(anyhow::anyhow!("overflowed multiply"));
-        }
-        let (units, of) = units.overflowing_add(sh);
-        if of {
-            return Err(anyhow::anyhow!("overflowed multiply"));
-        }
-        Ok(MoneyValueOps(MoneyValue {
-            currency,
-            units,
-            nano,
-        }))
-    }
-
-    fn multiply(self, rhs: i32) -> anyhow::Result<MoneyValueOps> {
-        let rhs = Quotation {
-            units: rhs as i64,
-            nano: 0,
-        };
-        self.try_multiply(rhs)
-    }
-}
-
 fn to_float(x: &MoneyValue) -> f64 {
     assert_eq!(x.currency, "rub");
     let nano = x.nano as f64;
@@ -149,12 +46,6 @@ fn to_float_quant(x: &Quotation) -> f64 {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenv::dotenv().unwrap();
-
-    // let token = SecretBox::<[u8; 88]>::new(|mut sec| {
-    //     let s = std::env::var("TINKOFF_TOKEN").unwrap();
-    //     let mut s = std::io::Cursor::new(s.as_bytes());
-    //     s.read_exact(&mut sec[..]).unwrap();
-    // });
 
     let config_name = std::env::var("TINKOFF_CONFIG").unwrap();
     let config: Config = serde_yaml::from_reader(std::fs::File::open(config_name)?)?;
@@ -185,17 +76,8 @@ async fn main() -> anyhow::Result<()> {
     let request = Request::new(GetAccountsRequest {});
 
     let resp = user_client.get_accounts(request).await?.into_inner();
-    // println!("accounts: {:?}", resp.accounts);
 
     let account_id = resp.accounts[0].id.clone();
-
-    // let port_stream = operations_stream_client
-    //     .portfolio_stream(PortfolioStreamRequest {
-    //         accounts: vec![account_id.clone()],
-    //     })
-    //     .await?;
-
-    // let mut port_stream = port_stream.into_inner();
 
     let portfolio_resp = operations_client
         .get_portfolio(PortfolioRequest {
@@ -204,7 +86,6 @@ async fn main() -> anyhow::Result<()> {
         })
         .await?
         .into_inner();
-    // println!("portfolio resp: {:?}", portfolio_resp);
     let etfs_resp = instruments_client
         .etfs(InstrumentsRequest {
             instrument_status: Some(InstrumentStatus::All.into()),
