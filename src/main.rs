@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use api::{
     instruments_service_client::InstrumentsServiceClient,
     operations_service_client::OperationsServiceClient, portfolio_request::CurrencyRequest,
@@ -6,6 +5,7 @@ use api::{
     InstrumentsRequest, MoneyValue, PortfolioRequest, Quotation,
 };
 use serde::Deserialize;
+use std::collections::HashMap;
 use tonic::{
     metadata::{Ascii, MetadataValue},
     transport::{Channel, ClientTlsConfig},
@@ -20,7 +20,7 @@ struct Config {
 #[derive(Deserialize, Debug)]
 struct Asset {
     allocation: u8,
-    ticker: String,
+    ticker: Ticker,
 }
 
 fn interceptor_fn(
@@ -41,6 +41,21 @@ fn to_float(x: &MoneyValue) -> f64 {
 
 fn to_float_quant(x: &Quotation) -> f64 {
     x.units as f64
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Hash)]
+struct TinkoffUid(String);
+
+#[derive(PartialEq, Eq, PartialOrd, Hash, Deserialize, Debug, Clone)]
+struct Ticker(String);
+
+struct EtfInfo {
+    ticker: Ticker,
+    target_allocation: f64,
+    current_allocation: f64,
+    current_price: f64,
+    shifted: bool,
+    volume: f64,
 }
 
 #[tokio::main]
@@ -93,103 +108,116 @@ async fn main() -> anyhow::Result<()> {
         .await?
         .into_inner();
 
-    let tickers = config.assets.iter().map(|e| &e.ticker).collect::<Vec<_>>();
-    let mut tickers_ids = vec![];
-    for t in tickers {
-        let etf = etfs_resp
-            .instruments
-            .iter()
-            .find(|e| e.ticker == *t)
-            .unwrap();
-        tickers_ids.push(etf.clone());
-    }
-
-    let tickers_map = tickers_ids
-        .into_iter()
-        .map(|e| (e.uid.clone(), e))
-        .collect::<HashMap<_, _>>();
-
-    let etfs = portfolio_resp
-        .positions
-        .into_iter()
-        .filter(|e| tickers_map.contains_key(&e.instrument_uid))
+    let tickers = config
+        .assets
+        .iter()
+        .map(|e| e.ticker.clone())
         .collect::<Vec<_>>();
-
-    let etfs = tickers_map
-        .into_iter()
-        .map(|(k, v)| {
-            let port_etf = etfs.iter().find(|e| e.instrument_uid == v.uid).unwrap();
-            // let etf = etfs_resp
-            //     .instruments
-            //     .iter()
-            //     .find(|e| e.uid == v.uid)
-            //     .unwrap();
-            let asset = config.assets.iter().find(|e| e.ticker == v.ticker).unwrap();
-            (k, (v, port_etf.clone(), asset.allocation))
+    let tinkoff_etfs_data = tickers
+        .iter()
+        .map(|t| {
+            let etf = etfs_resp
+                .instruments
+                .iter()
+                .find(|e| e.ticker == t.0)
+                .unwrap()
+                .clone();
+            (TinkoffUid(etf.uid.clone()), etf)
+        })
+        .collect::<HashMap<_, _>>();
+    let tinkoff_ticker_to_uid = tickers
+        .iter()
+        .map(|t| {
+            let etf = etfs_resp
+                .instruments
+                .iter()
+                .find(|e| e.ticker == t.0)
+                .unwrap()
+                .clone();
+            (t.clone(), TinkoffUid(etf.uid.clone()))
         })
         .collect::<HashMap<_, _>>();
 
-    // println!("etfs {:?}", etfs);
+    let portfolio_etfs_data = portfolio_resp
+        .positions
+        .into_iter()
+        .filter(|e| tinkoff_etfs_data.contains_key(&TinkoffUid(e.instrument_uid.clone())))
+        .map(|e| (TinkoffUid(e.instrument_uid.clone()), e))
+        .collect::<HashMap<_, _>>();
 
-    let total_etf_value = etfs
+    let total_etf_value = portfolio_etfs_data
         .values()
-        .map(|e| {
+        .map(|etf| {
             (
-                e.1.current_price.as_ref().unwrap(),
-                e.1.quantity.as_ref().unwrap(),
-                e.0.lot,
+                etf.current_price.clone().unwrap(),
+                etf.quantity.clone().unwrap(),
+                tinkoff_etfs_data[&TinkoffUid(etf.instrument_uid.clone())].lot,
             )
         })
         .fold(0_f64, |acc, (x, q, lot)| {
-            acc + to_float(x) * to_float_quant(q) * (lot as f64)
+            acc + to_float(&x) * to_float_quant(&q) * (lot as f64)
         });
 
     println!("total etf value {:?}", total_etf_value);
 
-    let etfs = etfs
-        .into_iter()
-        .map(|(k, (etf, pos, alloc))| {
-            let current_alloc = to_float(pos.current_price.as_ref().unwrap())
-                * to_float_quant(pos.quantity.as_ref().unwrap())
-                * (etf.lot as f64)
+    let current_etf_info_converted = tickers
+        .iter()
+        .map(|t| {
+            let uid = &tinkoff_ticker_to_uid[t];
+            let etf_port = &portfolio_etfs_data[uid];
+            let api_data = &tinkoff_etfs_data[uid];
+
+            let current_price = to_float(etf_port.current_price.as_ref().unwrap());
+            let current_alloc = to_float(etf_port.current_price.as_ref().unwrap())
+                * to_float_quant(etf_port.quantity.as_ref().unwrap())
+                * (api_data.lot as f64)
                 / total_etf_value
                 * 100.0;
-            // let current_alloc = current_alloc.round() as u8;
+
+            let target_alloc = config
+                .assets
+                .iter()
+                .find(|e| e.ticker == *t)
+                .unwrap()
+                .allocation;
             let shifted = if current_alloc < 20.0 {
                 let shift_val = current_alloc * 0.05;
-                (current_alloc - alloc as f64).abs() > shift_val
+                (current_alloc - target_alloc as f64).abs() > shift_val
             } else {
-                alloc.abs_diff(current_alloc as u8) >= 5
+                target_alloc.abs_diff(current_alloc as u8) >= 5
             };
+            let volume = current_alloc * total_etf_value / 100.0;
 
-            let vol = current_alloc * total_etf_value / 100.0;
-
-            (k, (etf, pos, alloc, current_alloc, shifted, vol))
+            EtfInfo {
+                ticker: t.clone(),
+                target_allocation: target_alloc as f64,
+                current_allocation: current_alloc,
+                current_price,
+                shifted,
+                volume,
+            }
         })
-        .collect::<HashMap<_, _>>();
+        .collect::<Vec<_>>();
 
-    for v in etfs.values() {
+    for v in &current_etf_info_converted {
         println!(
             "ticker {} alloc {} current {} shifted {} vol {}",
-            v.0.ticker, v.2, v.3, v.4, v.5
+            v.ticker.0, v.target_allocation, v.current_allocation, v.shifted, v.volume
         );
     }
 
-    let realloc = etfs.values().any(|e| e.4);
+    let realloc = current_etf_info_converted.iter().any(|e| e.shifted);
     if realloc {
         println!("required changes:");
 
-        for v in etfs.values() {
-            let target_vol = (v.2 as f64) * total_etf_value / 100.0;
-            let diff = target_vol - v.5;
-            let diff_lot = diff / to_float(v.1.current_price.as_ref().unwrap());
+        for v in &current_etf_info_converted {
+            let target_vol = v.target_allocation * total_etf_value / 100.0;
+            let diff = target_vol - v.volume;
+            let diff_lot = diff / v.current_price;
             let diff_lot = diff_lot.round() as i32;
             println!(
                 "ticker {} target_vol {} lot_change {} current_price {}",
-                v.0.ticker,
-                target_vol,
-                diff_lot,
-                to_float(v.1.current_price.as_ref().unwrap()),
+                v.ticker.0, target_vol, diff_lot, v.current_price,
             );
         }
     }
