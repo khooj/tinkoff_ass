@@ -1,8 +1,8 @@
 use api::{
     instruments_service_client::InstrumentsServiceClient,
     operations_service_client::OperationsServiceClient, portfolio_request::CurrencyRequest,
-    users_service_client::UsersServiceClient, GetAccountsRequest, InstrumentStatus,
-    InstrumentsRequest, MoneyValue, PortfolioRequest, Quotation,
+    users_service_client::UsersServiceClient, Etf, GetAccountsRequest, InstrumentStatus,
+    InstrumentsRequest, MoneyValue, PortfolioPosition, PortfolioRequest, Quotation,
 };
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -56,6 +56,75 @@ struct EtfInfo {
     current_price: f64,
     shifted: bool,
     volume: f64,
+}
+
+fn calculate_total_etf_value<'a, T>(
+    portfolio_etfs: T,
+    tinkoff_etfs: &HashMap<TinkoffUid, Etf>,
+) -> f64
+where
+    T: IntoIterator<Item = &'a PortfolioPosition>,
+{
+    portfolio_etfs
+        .into_iter()
+        .map(|etf| {
+            (
+                etf.current_price.clone().unwrap(),
+                etf.quantity.clone().unwrap(),
+                tinkoff_etfs[&TinkoffUid(etf.instrument_uid.clone())].lot,
+            )
+        })
+        .fold(0_f64, |acc, (x, q, lot)| {
+            acc + to_float(&x) * to_float_quant(&q) * (lot as f64)
+        })
+}
+
+fn calculate_current_etf_allocation_and_deviations<'a, T>(
+    tickers: T,
+    ticker_to_uid: &HashMap<Ticker, TinkoffUid>,
+    portfolio_etfs_data: &HashMap<TinkoffUid, PortfolioPosition>,
+    tinkoff_etfs_data: &HashMap<TinkoffUid, Etf>,
+    total_etf_value: f64,
+    config: &Config,
+) -> Vec<EtfInfo>
+where
+    T: Iterator<Item = &'a Ticker>,
+{
+    tickers
+        .map(|t| {
+            let uid = &ticker_to_uid[t];
+            let etf_port = &portfolio_etfs_data[uid];
+            let api_data = &tinkoff_etfs_data[uid];
+
+            let current_price = to_float(etf_port.current_price.as_ref().unwrap());
+            let current_quantity = to_float_quant(etf_port.quantity.as_ref().unwrap());
+            let current_alloc =
+                current_price * current_quantity * (api_data.lot as f64) / total_etf_value * 100.0;
+
+            let target_alloc = config
+                .assets
+                .iter()
+                .find(|e| e.ticker == *t)
+                .unwrap()
+                .allocation;
+            let shifted = if current_alloc < 20.0 {
+                let shift_val = current_alloc * 0.05;
+                (current_alloc - target_alloc as f64).abs() > shift_val
+            } else {
+                target_alloc.abs_diff(current_alloc as u8) >= 5
+            };
+            let volume = current_alloc * total_etf_value / 100.0;
+
+            EtfInfo {
+                ticker: t.clone(),
+                target_allocation: target_alloc as f64,
+                current_allocation: current_alloc,
+                current_price,
+                shifted,
+                volume,
+            }
+        })
+        .collect()
 }
 
 #[tokio::main]
@@ -145,59 +214,19 @@ async fn main() -> anyhow::Result<()> {
         .map(|e| (TinkoffUid(e.instrument_uid.clone()), e))
         .collect::<HashMap<_, _>>();
 
-    let total_etf_value = portfolio_etfs_data
-        .values()
-        .map(|etf| {
-            (
-                etf.current_price.clone().unwrap(),
-                etf.quantity.clone().unwrap(),
-                tinkoff_etfs_data[&TinkoffUid(etf.instrument_uid.clone())].lot,
-            )
-        })
-        .fold(0_f64, |acc, (x, q, lot)| {
-            acc + to_float(&x) * to_float_quant(&q) * (lot as f64)
-        });
+    let total_etf_value =
+        calculate_total_etf_value(portfolio_etfs_data.values(), &tinkoff_etfs_data);
 
     println!("total etf value {:?}", total_etf_value);
 
-    let current_etf_info_converted = tickers
-        .iter()
-        .map(|t| {
-            let uid = &tinkoff_ticker_to_uid[t];
-            let etf_port = &portfolio_etfs_data[uid];
-            let api_data = &tinkoff_etfs_data[uid];
-
-            let current_price = to_float(etf_port.current_price.as_ref().unwrap());
-            let current_alloc = to_float(etf_port.current_price.as_ref().unwrap())
-                * to_float_quant(etf_port.quantity.as_ref().unwrap())
-                * (api_data.lot as f64)
-                / total_etf_value
-                * 100.0;
-
-            let target_alloc = config
-                .assets
-                .iter()
-                .find(|e| e.ticker == *t)
-                .unwrap()
-                .allocation;
-            let shifted = if current_alloc < 20.0 {
-                let shift_val = current_alloc * 0.05;
-                (current_alloc - target_alloc as f64).abs() > shift_val
-            } else {
-                target_alloc.abs_diff(current_alloc as u8) >= 5
-            };
-            let volume = current_alloc * total_etf_value / 100.0;
-
-            EtfInfo {
-                ticker: t.clone(),
-                target_allocation: target_alloc as f64,
-                current_allocation: current_alloc,
-                current_price,
-                shifted,
-                volume,
-            }
-        })
-        .collect::<Vec<_>>();
+    let current_etf_info_converted = calculate_current_etf_allocation_and_deviations(
+        tickers.iter(),
+        &tinkoff_ticker_to_uid,
+        &portfolio_etfs_data,
+        &tinkoff_etfs_data,
+        total_etf_value,
+        &config,
+    );
 
     for v in &current_etf_info_converted {
         println!(
