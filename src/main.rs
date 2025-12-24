@@ -15,6 +15,7 @@ use tonic::{
 #[derive(Deserialize, Debug)]
 struct Config {
     assets: Vec<Asset>,
+    change: Option<f64>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -219,12 +220,21 @@ async fn main() -> anyhow::Result<()> {
 
     println!("total etf value {:?}", total_etf_value);
 
+    let target_etf_value = if let Some(change) = config.change {
+        let target = total_etf_value + change;
+        println!("ATTENTION! CALCULATIONS DONE ACCORDING TO MANUAL VALUE CHANGE!");
+        println!("total etf value after change applied {:?}", target);
+        target
+    } else {
+        total_etf_value
+    };
+
     let current_etf_info_converted = calculate_current_etf_allocation_and_deviations(
         tickers.iter(),
         &tinkoff_ticker_to_uid,
         &portfolio_etfs_data,
         &tinkoff_etfs_data,
-        total_etf_value,
+        target_etf_value,
         &config,
     );
 
@@ -240,13 +250,13 @@ async fn main() -> anyhow::Result<()> {
         println!("required changes:");
 
         for v in &current_etf_info_converted {
-            let target_vol = v.target_allocation * total_etf_value / 100.0;
+            let target_vol = v.target_allocation * target_etf_value / 100.0;
             let diff = target_vol - v.volume;
             let diff_lot = diff / v.current_price;
             let diff_lot = diff_lot.round() as i32;
             println!(
-                "ticker {} target_vol {} lot_change {} current_price {}",
-                v.ticker.0, target_vol, diff_lot, v.current_price,
+                "ticker {} target_vol {} lot_change {}: {} current_price {}",
+                v.ticker.0, target_vol, if diff_lot < 0 { "SELL" } else { "BUY"}, diff_lot.abs(), v.current_price,
             );
         }
     }
